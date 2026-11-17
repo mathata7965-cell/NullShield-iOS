@@ -1,0 +1,85 @@
+name: Build Sideload-Ready IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-ipa:
+    name: Compile Null iOS & Package Sideload IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Xcode, Refresh Icon & Generate Xcode Project
+        run: |
+          xcodebuild -version
+          python3 scripts/generate_app_icon.py
+          ls -lh Null/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+          ls -lh NullSafariBlocker/blockerList.json
+          ls -lh Null/Resources/FilterPack.json
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Build Release iOS App (Ad-Hoc Sideload Ready)
+        run: |
+          set -o pipefail
+          xcodebuild clean build \
+            -project Null.xcodeproj \
+            -target Null \
+            -configuration Release \
+            -sdk iphoneos \
+            SYMROOT="$PWD/build" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES 2>&1 | tee xcodebuild.log
+
+      - name: Upload Xcode Build Log on Failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          retention-days: 7
+
+      - name: Ad-Hoc Sign & Package Both Full & NoExtension IPAs
+        run: |
+          mkdir -p build/ipa/Payload
+          cp -R build/Release-iphoneos/Null.app build/ipa/Payload/
+          for appex in build/ipa/Payload/Null.app/PlugIns/*.appex; do
+            if [ -d "$appex" ]; then
+              codesign --force --deep --sign - "$appex"
+            fi
+          done
+          codesign --force --deep --sign - build/ipa/Payload/Null.app
+          codesign --verify --deep --strict build/ipa/Payload/Null.app || true
+          (cd build/ipa && zip -r ../../Null.ipa Payload)
+
+          mkdir -p build/ipa-noext/Payload
+          cp -R build/Release-iphoneos/Null.app build/ipa-noext/Payload/
+          rm -rf build/ipa-noext/Payload/Null.app/PlugIns
+          codesign --force --deep --sign - build/ipa-noext/Payload/Null.app
+          codesign --verify --deep --strict build/ipa-noext/Payload/Null.app || true
+          (cd build/ipa-noext && zip -r ../../Null-NoExtension.ipa Payload)
+
+          ls -lh Null.ipa Null-NoExtension.ipa
+
+      - name: Upload Null IPA Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Null-ipa
+          path: |
+            Null.ipa
+            Null-NoExtension.ipa
+          retention-days: 30
